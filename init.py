@@ -1,169 +1,126 @@
 import asyncio
 import requests
 from typing import Dict
-
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
     ContextTypes,
-    filters
+    filters,
 )
 
-# ─────────── CONFIG ───────────
+# ───────── CONFIG ─────────
 TELEGRAM_TOKEN = "7886615519:AAGlUXVxWw9lYRmk_P6sI3XfC__BOoBUMNw"
-BINANCE_PRICE_URL = "https://api.binance.com/api/v3/ticker/price"
+BINANCE_URL = "https://api.binance.com/api/v3/ticker/price"
 
+MIN_PERIOD = 0.1      # dakika
+MIN_PERCENT = 0.01
 MAX_RESULTS = 20
-MESSAGE_LIMIT = 4000
-MIN_PERIOD = 0.1     # dakika
-MIN_PERCENT = 0.01  # %
+MSG_LIMIT = 4000
 
-# ─────────── STATE ───────────
 user_state: Dict[int, dict] = {}
 
-# ─────────── BINANCE API ───────────
-def get_binance_prices() -> Dict[str, float]:
-    r = requests.get(BINANCE_PRICE_URL, timeout=10)
+# ───────── BINANCE ─────────
+def get_prices():
+    r = requests.get(BINANCE_URL, timeout=10)
     r.raise_for_status()
-    data = r.json()
-    return {item["symbol"]: float(item["price"]) for item in data}
+    return {x["symbol"]: float(x["price"]) for x in r.json()}
 
-# ─────────── UTILS ───────────
-async def send_long_message(bot, chat_id: int, text: str):
-    for i in range(0, len(text), MESSAGE_LIMIT):
-        await bot.send_message(chat_id, text[i:i + MESSAGE_LIMIT])
+# ───────── UTILS ─────────
+async def send_long(bot, chat_id, text):
+    for i in range(0, len(text), MSG_LIMIT):
+        await bot.send_message(chat_id, text[i:i+MSG_LIMIT])
 
-# ─────────── COMMANDS ───────────
+# ───────── COMMANDS ─────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_state[chat_id] = {"step": "period"}
-
     await update.message.reply_text(
-        "⏱ Periyot (dakika) giriniz\n"
-        "Örnek: 1 | 0.5 | 0.3"
+        "⏱ Periyot gir (dk)\nÖrnek: 1 | 0.5 | 0.3"
     )
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    user_state.pop(chat_id, None)
-    await update.message.reply_text("🛑 Takip durduruldu.")
+    user_state.pop(update.effective_chat.id, None)
+    await update.message.reply_text("🛑 Takip durduruldu")
 
-# ─────────── INPUT HANDLER ───────────
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ───────── MESSAGE FLOW ─────────
+async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    text = update.message.text.strip()
-
     if chat_id not in user_state:
         return
 
     state = user_state[chat_id]
+    text = update.message.text.strip()
 
-    # ⏱ PERIOD
+    try:
+        value = float(text)
+    except:
+        await update.message.reply_text("❌ Sayı gir")
+        return
+
     if state["step"] == "period":
-        try:
-            period = float(text)
-            if period < MIN_PERIOD:
-                raise ValueError
+        if value < MIN_PERIOD:
+            await update.message.reply_text("❌ Çok küçük")
+            return
+        state["period"] = value
+        state["step"] = "percent"
+        await update.message.reply_text("📈 Yüzde gir (örn: 0.5 | 1)")
 
-            state["period"] = period
-            state["step"] = "percent"
-
-            await update.message.reply_text(
-                "📊 Yüzdelik değişim giriniz\n"
-                "Örnek: 2 | 0.5 | 0.1"
-            )
-        except:
-            await update.message.reply_text("❌ Geçerli bir periyot giriniz.")
-
-    # 📈 PERCENT
     elif state["step"] == "percent":
-        try:
-            percent = float(text)
-            if percent < MIN_PERCENT:
-                raise ValueError
+        if value < MIN_PERCENT:
+            await update.message.reply_text("❌ Çok küçük")
+            return
+        state["percent"] = value
+        state["step"] = "running"
 
-            state["percent"] = percent
-            state["step"] = "running"
+        await update.message.reply_text("🚀 Takip başladı")
+        context.application.create_task(monitor(context, chat_id))
 
-            await update.message.reply_text(
-                f"🚀 Takip başladı\n"
-                f"⏱ {state['period']} dk\n"
-                f"📈 %{state['percent']}"
-            )
-
-            context.application.create_task(
-                price_monitor(context, chat_id)
-            )
-
-        except:
-            await update.message.reply_text("❌ Geçerli bir yüzde giriniz.")
-
-# ─────────── CORE LOGIC ───────────
-async def price_monitor(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+# ───────── CORE ─────────
+async def monitor(context, chat_id):
     period = user_state[chat_id]["period"]
     percent = user_state[chat_id]["percent"]
 
     while chat_id in user_state:
         try:
-            start_prices = get_binance_prices()
+            start = get_prices()
             await asyncio.sleep(period * 60)
-            end_prices = get_binance_prices()
+            end = get_prices()
 
             changes = []
-
-            for symbol, old in start_prices.items():
-                new = end_prices.get(symbol)
+            for s, old in start.items():
+                new = end.get(s)
                 if not new or old <= 0:
                     continue
-
-                change = ((new - old) / old) * 100
-                if abs(change) >= percent:
-                    changes.append((symbol, change))
+                diff = ((new - old) / old) * 100
+                if abs(diff) >= percent:
+                    changes.append((s, diff))
 
             if changes:
                 changes.sort(key=lambda x: abs(x[1]), reverse=True)
-                changes = changes[:MAX_RESULTS]
-
-                lines = [
-                    f"{'📈' if c > 0 else '📉'} {s}: %{c:.2f}"
-                    for s, c in changes
-                ]
-
-                message = "🔥 Değişim olan coinler:\n\n" + "\n".join(lines)
-                await send_long_message(context.bot, chat_id, message)
-
-                user_state.pop(chat_id, None)
-                break
-
-            else:
-                await context.bot.send_message(
-                    chat_id,
-                    "😴 Değişim yok, tekrar kontrol ediliyor..."
+                msg = "🔥 Değişim:\n\n" + "\n".join(
+                    f"{'📈' if c>0 else '📉'} {s}: %{c:.2f}"
+                    for s, c in changes[:MAX_RESULTS]
                 )
+                await send_long(context.bot, chat_id, msg)
+                user_state.pop(chat_id, None)
+                return
+            else:
+                await context.bot.send_message(chat_id, "😴 Değişim yok")
 
         except Exception as e:
-            await context.bot.send_message(
-                chat_id,
-                f"⚠️ Geçici hata oluştu:\n{e}"
-            )
+            await context.bot.send_message(chat_id, f"⚠️ Hata: {e}")
             await asyncio.sleep(5)
 
-# ─────────── MAIN (ASYNC ŞART) ───────────
-async def main():
-    app = (
-        ApplicationBuilder()
-        .token(TELEGRAM_TOKEN)
-        .build()
-    )
-
+# ───────── MAIN ─────────
+def main():
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stop", stop))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
     print("🤖 Bot çalışıyor")
-    await app.run_polling()
+    app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
