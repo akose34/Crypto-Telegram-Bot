@@ -1,6 +1,7 @@
 import asyncio
 import requests
 from typing import Dict
+
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -14,19 +15,19 @@ from telegram.ext import (
 TELEGRAM_TOKEN = "7886615519:AAGlUXVxWw9lYRmk_P6sI3XfC__BOoBUMNw"
 BINANCE_PRICE_URL = "https://api.binance.com/api/v3/ticker/price"
 
-MAX_RESULTS = 20          # Telegram spam önleme
-MESSAGE_LIMIT = 4000     # Telegram güvenli limit
-MIN_PERIOD = 0.1         # dakika
-MIN_PERCENT = 0.01       # %
+MAX_RESULTS = 20
+MESSAGE_LIMIT = 4000
+MIN_PERIOD = 0.1     # dakika
+MIN_PERCENT = 0.01  # %
 
 # ─────────── STATE ───────────
 user_state: Dict[int, dict] = {}
 
 # ─────────── BINANCE API ───────────
 def get_binance_prices() -> Dict[str, float]:
-    response = requests.get(BINANCE_PRICE_URL, timeout=10)
-    response.raise_for_status()
-    data = response.json()
+    r = requests.get(BINANCE_PRICE_URL, timeout=10)
+    r.raise_for_status()
+    data = r.json()
     return {item["symbol"]: float(item["price"]) for item in data}
 
 # ─────────── UTILS ───────────
@@ -46,11 +47,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if chat_id in user_state:
-        del user_state[chat_id]
-        await update.message.reply_text("🛑 Takip durduruldu.")
-    else:
-        await update.message.reply_text("ℹ️ Aktif takip yok.")
+    user_state.pop(chat_id, None)
+    await update.message.reply_text("🛑 Takip durduruldu.")
 
 # ─────────── INPUT HANDLER ───────────
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -77,7 +75,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Örnek: 2 | 0.5 | 0.1"
             )
         except:
-            await update.message.reply_text("❌ Geçerli bir sayı giriniz.")
+            await update.message.reply_text("❌ Geçerli bir periyot giriniz.")
 
     # 📈 PERCENT
     elif state["step"] == "percent":
@@ -95,13 +93,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📈 %{state['percent']}"
             )
 
-            # 🔥 background task
             context.application.create_task(
                 price_monitor(context, chat_id)
             )
 
         except:
-            await update.message.reply_text("❌ Geçerli bir sayı giriniz.")
+            await update.message.reply_text("❌ Geçerli bir yüzde giriniz.")
 
 # ─────────── CORE LOGIC ───────────
 async def price_monitor(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
@@ -116,15 +113,12 @@ async def price_monitor(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
 
             changes = []
 
-            for symbol, old_price in start_prices.items():
-                if symbol not in end_prices:
-                    continue
-                if old_price <= 0:
+            for symbol, old in start_prices.items():
+                new = end_prices.get(symbol)
+                if not new or old <= 0:
                     continue
 
-                new_price = end_prices[symbol]
-                change = ((new_price - old_price) / old_price) * 100
-
+                change = ((new - old) / old) * 100
                 if abs(change) >= percent:
                     changes.append((symbol, change))
 
@@ -140,7 +134,7 @@ async def price_monitor(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
                 message = "🔥 Değişim olan coinler:\n\n" + "\n".join(lines)
                 await send_long_message(context.bot, chat_id, message)
 
-                del user_state[chat_id]
+                user_state.pop(chat_id, None)
                 break
 
             else:
@@ -152,17 +146,15 @@ async def price_monitor(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
         except Exception as e:
             await context.bot.send_message(
                 chat_id,
-                f"⚠️ Geçici hata oluştu, tekrar denenecek.\n{str(e)}"
+                f"⚠️ Geçici hata oluştu:\n{e}"
             )
             await asyncio.sleep(5)
 
-# ─────────── MAIN ───────────
-if __name__ == "__main__":
+# ─────────── MAIN (ASYNC ŞART) ───────────
+async def main():
     app = (
         ApplicationBuilder()
         .token(TELEGRAM_TOKEN)
-        .connect_timeout(30)
-        .read_timeout(30)
         .build()
     )
 
@@ -171,4 +163,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("🤖 Bot çalışıyor")
-    app.run_polling()
+    await app.run_polling()
+
+if __name__ == "__main__":
+    asyncio.run(main())
