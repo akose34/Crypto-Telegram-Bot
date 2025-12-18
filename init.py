@@ -23,9 +23,19 @@ user_state: Dict[int, dict] = {}
 
 # ───────── BINANCE ─────────
 def get_prices():
-    r = requests.get(BINANCE_URL, timeout=10)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; CryptoTelegramBot/1.0)"
+    }
+
+    r = requests.get(
+        BINANCE_URL,
+        headers=headers,
+        timeout=10
+    )
     r.raise_for_status()
+
     return {x["symbol"]: float(x["price"]) for x in r.json()}
+
 
 # ───────── UTILS ─────────
 async def send_long(bot, chat_id, text):
